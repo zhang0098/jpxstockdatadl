@@ -1,0 +1,7 @@
+#!/bin/sh
+# Shell wrapper for jpxstockdatadl CLI.
+# Usage:
+#     ./jpxstockdatadl 7203 --years 3
+#     EDINET_API_KEY=xxx ./jpxstockdatadl 7203
+
+exec python3 -m jpxstockdatadl "$@"
