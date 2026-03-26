@@ -33,6 +33,8 @@ from jpxstockdatadl.downloader import apply_precise_metric_overrides
 from jpxstockdatadl.downloader import build_json_output_path
 from jpxstockdatadl.downloader import cleanup_stale_json
 from jpxstockdatadl.downloader import extract_precise_metric_value
+from jpxstockdatadl.downloader import export_financials_markdown
+from jpxstockdatadl.downloader import finalize_download_summary
 from jpxstockdatadl.downloader import load_manifest
 from jpxstockdatadl.downloader import resolve_recent_session_cache
 
@@ -251,6 +253,144 @@ class DownloaderSessionCacheTests(unittest.TestCase):
 
         self.assertIsNone(cached_session)
         self.assertNotIn("1234:5", manifest["sessions"])
+
+    def test_export_financials_markdown_builds_sorted_table_and_formats_values(self) -> None:
+        annual_payload = {
+            "company": {
+                "edinet_code": "E01377",
+                "name_jp": "オーエスジー株式会社",
+                "name_en": "OSG Corporation",
+                "securities_code": "6136",
+            },
+            "metadata": {
+                "doc_id": "DOC-ANNUAL",
+                "period_start": "2024-12-01",
+                "period_end": "2025-11-30",
+                "fiscal_year": 2025,
+                "accounting_standard": "JP-GAAP",
+                "filing_type": "annual",
+                "filed_at": None,
+            },
+            "financials": [
+                {"field_name": "revenue", "value": 160_619_000_000, "currency": "JPY"},
+                {"field_name": "net_income", "value": 14_334_000_000, "currency": "JPY"},
+                {"field_name": "eps", "value": 172.11, "currency": "JPY"},
+                {"field_name": "equity_ratio", "value": 0.675, "currency": "JPY"},
+                {"field_name": "num_employees", "value": 7563, "currency": "JPY"},
+            ],
+        }
+        semiannual_payload = {
+            "company": {
+                "edinet_code": "E01377",
+                "name_jp": "オーエスジー株式会社",
+                "name_en": "OSG Corporation",
+                "securities_code": "6136",
+            },
+            "metadata": {
+                "doc_id": "DOC-SEMI",
+                "period_start": "2024-12-01",
+                "period_end": "2025-05-31",
+                "fiscal_year": 2025,
+                "accounting_standard": "JP-GAAP",
+                "filing_type": "semiannual",
+                "filed_at": None,
+            },
+            "financials": [
+                {"field_name": "revenue", "value": 80_100_000_000, "currency": "JPY"},
+                {"field_name": "net_income", "value": 7_500_000_000, "currency": "JPY"},
+                {"field_name": "eps", "value": 91.2, "currency": "JPY"},
+                {"field_name": "equity_ratio", "value": 0.641, "currency": "JPY"},
+                {"field_name": "num_employees", "value": 7500, "currency": "JPY"},
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            (output_dir / "2025-11-30_annual.json").write_text(
+                json.dumps(annual_payload),
+                encoding="utf-8",
+            )
+            (output_dir / "2025-05-31_semiannual.json").write_text(
+                json.dumps(semiannual_payload),
+                encoding="utf-8",
+            )
+            (output_dir / "quote.json").write_text("{}", encoding="utf-8")
+            (output_dir / "financials.md").write_text("legacy\n", encoding="utf-8")
+
+            failures: list[str] = []
+            export_financials_markdown(output_dir, failures)
+
+            markdown = (output_dir / "finance_overview.md").read_text(encoding="utf-8")
+
+        self.assertEqual(failures, [])
+        self.assertFalse((output_dir / "financials.md").exists())
+        self.assertIn("- company: オーエスジー株式会社", markdown)
+        self.assertIn("- securities_code: 6136", markdown)
+        self.assertIn("- units: monetary values use M/B/T; ratios use %", markdown)
+        self.assertIn("## Key Metrics", markdown)
+        self.assertIn("- latest filing: 2025-11-30 annual (FY2025)", markdown)
+        self.assertIn("- comparable filing: 2025-05-31 semiannual", markdown)
+        self.assertIn("- currency: JPY", markdown)
+        self.assertIn("- Revenue: 160.6B (vs 80.1B, +100.5%)", markdown)
+        self.assertIn("- Net income: 14.3B (vs 7.5B, +91.1%)", markdown)
+        self.assertIn("- EPS: 172.11 (vs 91.2, +88.7%)", markdown)
+        self.assertIn("- Equity ratio: 67.5% (vs 64.1%, +3.4pp)", markdown)
+        self.assertIn("| period_end | period_start | fiscal_year | filing_type | accounting_standard | revenue | net_income | eps | equity_ratio | num_employees |", markdown)
+        semiannual_row = "| 2025-05-31 | 2024-12-01 | 2025 | semiannual | JP-GAAP | 80.1B | 7.5B | 91.2 | 64.1% | 7,500 |"
+        annual_row = "| 2025-11-30 | 2024-12-01 | 2025 | annual | JP-GAAP | 160.6B | 14.3B | 172.11 | 67.5% | 7,563 |"
+        self.assertIn(semiannual_row, markdown)
+        self.assertIn(annual_row, markdown)
+        self.assertLess(markdown.index(semiannual_row), markdown.index(annual_row))
+        self.assertNotIn("| doc_id |", markdown)
+        self.assertNotIn("DOC-SEMI", markdown)
+        self.assertNotIn("DOC-ANNUAL", markdown)
+        self.assertNotIn("quote.json", markdown)
+
+    def test_finalize_download_summary_exports_financials_before_business_overview(self) -> None:
+        call_order: list[str] = []
+        original_export_json_files = downloader_module.export_json_files
+        original_export_financials_markdown = downloader_module.export_financials_markdown
+        original_export_business_overview = downloader_module.export_business_overview
+        original_save_manifest = downloader_module.save_manifest
+
+        def fake_export_json_files(*args: object, **kwargs: object) -> tuple[int, list[object]]:
+            call_order.append("json")
+            return 1, []
+
+        def fake_export_financials_markdown(*args: object, **kwargs: object) -> None:
+            call_order.append("financials")
+
+        def fake_export_business_overview(*args: object, **kwargs: object) -> None:
+            call_order.append("business")
+
+        def fake_save_manifest(*args: object, **kwargs: object) -> None:
+            call_order.append("manifest")
+
+        downloader_module.export_json_files = fake_export_json_files
+        downloader_module.export_financials_markdown = fake_export_financials_markdown
+        downloader_module.export_business_overview = fake_export_business_overview
+        downloader_module.save_manifest = fake_save_manifest
+
+        try:
+            summary = finalize_download_summary(
+                stock_code="6136",
+                output_dir=Path("/tmp/6136"),
+                manifest_path=Path("/tmp/6136/.manifest.json"),
+                manifest={"documents": {}, "sessions": {}, "version": MANIFEST_VERSION},
+                filings=[],
+                downloaded=0,
+                skipped=0,
+                export_targets=[],
+                failures=[],
+            )
+        finally:
+            downloader_module.export_json_files = original_export_json_files
+            downloader_module.export_financials_markdown = original_export_financials_markdown
+            downloader_module.export_business_overview = original_export_business_overview
+            downloader_module.save_manifest = original_save_manifest
+
+        self.assertEqual(summary.exported_json_documents, 1)
+        self.assertEqual(call_order, ["json", "financials", "business", "manifest"])
 
 
 if __name__ == "__main__":

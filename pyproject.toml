@@ -1,6 +1,6 @@
 [project]
 name = "jpxstockdatadl"
-version = "0.2"
+version = "0.2.1"
 requires-python = ">=3.12"
 dependencies = [
     "edinet_xbrl @ git+https://github.com/axioradev/edinet-xbrl.git",

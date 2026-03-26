@@ -29,11 +29,14 @@ ANNUAL_DOC_TYPE_CODE = "120"
 SEMIANNUAL_DOC_TYPE_CODE = "160"
 TARGET_DOC_TYPE_CODES = frozenset({ANNUAL_DOC_TYPE_CODE, SEMIANNUAL_DOC_TYPE_CODE})
 MANIFEST_FILE_NAME = ".manifest.json"
+FINANCE_OVERVIEW_MARKDOWN_FILE_NAME = "finance_overview.md"
+LEGACY_FINANCIALS_MARKDOWN_FILE_NAME = "financials.md"
 DEFAULT_API_KEY_ENV = "EDINET_API_KEY"
 INVALID_FILENAME_CHARS_RE = re.compile(r'[\\/:*?"<>|\r\n]+')
 WHITESPACE_RE = re.compile(r"\s+")
 NUMERIC_TEXT_RE = re.compile(r"^\d+(?:\.\d+)?$")
 HTML_TAG_RE = re.compile(r"<[^>]+>")
+FILING_JSON_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}_(?:annual|semiannual)\.json$")
 LIST_BATCH_SIZE = 30
 MANIFEST_VERSION = 2
 SESSION_CACHE_TTL = timedelta(days=14)
@@ -75,6 +78,57 @@ BUSINESS_OVERVIEW_SECTION_KEYWORDS = (
     "description of business",
     "management analysis of financial position operating results and cash flows",
     "research and development activities",
+)
+PERCENTAGE_FIELD_NAMES = frozenset({"equity_ratio", "roe", "payout_ratio"})
+PLAIN_NUMBER_FIELD_NAMES = frozenset(
+    {
+        "bps",
+        "eps",
+        "diluted_eps",
+        "dividends_per_share",
+        "pe_ratio",
+    }
+)
+COUNT_FIELD_NAMES = frozenset({"num_employees"})
+PREFERRED_FINANCIAL_FIELD_ORDER = (
+    "revenue",
+    "operating_income",
+    "ordinary_income",
+    "net_income",
+    "comprehensive_income",
+    "total_assets",
+    "total_liabilities",
+    "net_assets",
+    "cash_and_equivalents",
+    "operating_cf",
+    "investing_cf",
+    "financing_cf",
+    "capital_stock",
+    "short_term_loans",
+    "current_portion_lt_loans",
+    "bonds_payable",
+    "long_term_loans",
+    "eps",
+    "diluted_eps",
+    "bps",
+    "dividends_per_share",
+    "equity_ratio",
+    "roe",
+    "payout_ratio",
+    "pe_ratio",
+    "num_employees",
+)
+SUMMARY_FINANCIAL_FIELDS = (
+    ("revenue", "Revenue"),
+    ("operating_income", "Operating income"),
+    ("net_income", "Net income"),
+    ("total_assets", "Total assets"),
+    ("net_assets", "Net assets"),
+    ("cash_and_equivalents", "Cash and equivalents"),
+    ("eps", "EPS"),
+    ("dividends_per_share", "Dividends per share"),
+    ("equity_ratio", "Equity ratio"),
+    ("roe", "ROE"),
 )
 @dataclass(frozen=True)
 class FilingRecord:
@@ -365,6 +419,7 @@ def finalize_download_summary(
     exported_json_documents, exported_artifacts = export_json_files(
         export_targets, manifest, failures
     )
+    export_financials_markdown(output_dir, failures)
     export_business_overview(exported_artifacts, failures)
     save_manifest(manifest_path, manifest)
 
@@ -792,6 +847,328 @@ def parse_precise_numeric_text(value_text: str) -> int | float | None:
         return None
 
 
+def export_financials_markdown(output_dir: Path, failures: list[str]) -> None:
+    try:
+        json_paths = list_financial_json_paths(output_dir)
+        if not json_paths:
+            return
+
+        records = [load_financial_markdown_record(json_path) for json_path in json_paths]
+        output_path = output_dir / FINANCE_OVERVIEW_MARKDOWN_FILE_NAME
+        output_path.write_text(
+            render_financials_markdown(records),
+            encoding="utf-8",
+        )
+        cleanup_legacy_financials_markdown(output_dir, output_path)
+        print(f"Exported financials -> {output_path.name}")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        failures.append(f"financials markdown export: {exc}")
+        print(f"Failed   financials markdown export: {exc}")
+
+
+def list_financial_json_paths(output_dir: Path) -> list[Path]:
+    return sorted(
+        path
+        for path in output_dir.glob("*.json")
+        if FILING_JSON_NAME_RE.fullmatch(path.name)
+    )
+
+
+def load_financial_markdown_record(json_path: Path) -> dict[str, Any]:
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    metadata = data.get("metadata")
+    company = data.get("company")
+    financials = data.get("financials")
+
+    if not isinstance(metadata, dict):
+        raise ValueError(f"Invalid metadata in {json_path.name}")
+    if not isinstance(company, dict):
+        raise ValueError(f"Invalid company in {json_path.name}")
+    if not isinstance(financials, list):
+        raise ValueError(f"Invalid financials in {json_path.name}")
+
+    row: dict[str, Any] = {}
+    currencies: set[str] = set()
+    for item in financials:
+        if not isinstance(item, dict):
+            continue
+        field_name = item.get("field_name")
+        if not isinstance(field_name, str) or not field_name:
+            continue
+        row[field_name] = item.get("value")
+        currency = item.get("currency")
+        if isinstance(currency, str) and currency:
+            currencies.add(currency)
+
+    return {
+        "company": company,
+        "metadata": metadata,
+        "row": row,
+        "currency": resolve_financial_record_currency(currencies),
+    }
+
+
+def resolve_financial_record_currency(currencies: set[str]) -> str:
+    if not currencies:
+        return ""
+    if len(currencies) == 1:
+        return next(iter(currencies))
+    return "/".join(sorted(currencies))
+
+
+def cleanup_legacy_financials_markdown(output_dir: Path, current_output_path: Path) -> None:
+    legacy_path = output_dir / LEGACY_FINANCIALS_MARKDOWN_FILE_NAME
+    if legacy_path == current_output_path or not legacy_path.exists():
+        return
+    legacy_path.unlink()
+
+
+def render_financials_markdown(records: list[dict[str, Any]]) -> str:
+    if not records:
+        raise ValueError("No financial records found")
+
+    sorted_records = sorted(records, key=financial_markdown_sort_key)
+    company = sorted_records[-1]["company"]
+    metadata_columns = [
+        "period_end",
+        "period_start",
+        "fiscal_year",
+        "filing_type",
+        "accounting_standard",
+    ]
+    financial_columns = collect_financial_columns(sorted_records)
+    columns = metadata_columns + financial_columns
+
+    lines = ["# Finance Overview", ""]
+    company_name = company.get("name_jp") or company.get("name_en") or "Unknown Company"
+    lines.append(f"- company: {company_name}")
+    if company.get("name_en"):
+        lines.append(f"- company_en: {company['name_en']}")
+    if company.get("securities_code"):
+        lines.append(f"- securities_code: {company['securities_code']}")
+    if company.get("edinet_code"):
+        lines.append(f"- edinet_code: {company['edinet_code']}")
+    lines.append("- units: monetary values use M/B/T; ratios use %")
+    lines.append("")
+
+    lines.extend(render_financials_summary(sorted_records))
+
+    lines.append("| " + " | ".join(columns) + " |")
+    lines.append("| " + " | ".join("---" for _ in columns) + " |")
+    for record in sorted_records:
+        metadata = record["metadata"]
+        row = record["row"]
+        line_values = [
+            format_markdown_cell(metadata.get(column)) for column in metadata_columns
+        ]
+        line_values.extend(
+            format_financial_value(column, row.get(column)) for column in financial_columns
+        )
+        lines.append("| " + " | ".join(line_values) + " |")
+
+    return "\n".join(lines) + "\n"
+
+
+def render_financials_summary(records: list[dict[str, Any]]) -> list[str]:
+    latest_record = records[-1]
+    latest_metadata = latest_record["metadata"]
+    latest_row = latest_record["row"]
+    latest_currency = str(latest_record.get("currency") or "")
+    comparable_record = find_previous_comparable_record(records, latest_record)
+
+    filing_label = str(latest_metadata.get("filing_type") or "filing")
+    period_end = str(latest_metadata.get("period_end") or "")
+    fiscal_year = latest_metadata.get("fiscal_year")
+
+    lines = ["## Key Metrics", ""]
+    latest_line = f"- latest filing: {period_end} {filing_label}"
+    if fiscal_year is not None:
+        latest_line += f" (FY{fiscal_year})"
+    lines.append(latest_line)
+
+    if comparable_record is not None:
+        comparable_metadata = comparable_record["metadata"]
+        comparable_period_end = str(comparable_metadata.get("period_end") or "")
+        comparable_filing_type = str(comparable_metadata.get("filing_type") or filing_label)
+        lines.append(
+            f"- comparable filing: {comparable_period_end} {comparable_filing_type}"
+        )
+    if latest_currency:
+        lines.append(f"- currency: {latest_currency}")
+    lines.append("")
+
+    for field_name, label in SUMMARY_FINANCIAL_FIELDS:
+        if field_name not in latest_row:
+            continue
+        current_value = latest_row.get(field_name)
+        if current_value is None:
+            continue
+        comparison = ""
+        if comparable_record is not None:
+            previous_value = comparable_record["row"].get(field_name)
+            comparison = build_summary_comparison(field_name, current_value, previous_value)
+        metric_text = format_financial_value(field_name, current_value)
+        if comparison:
+            lines.append(f"- {label}: {metric_text} ({comparison})")
+        else:
+            lines.append(f"- {label}: {metric_text}")
+
+    lines.append("")
+    return lines
+
+
+def find_previous_comparable_record(
+    records: list[dict[str, Any]], latest_record: dict[str, Any]
+) -> dict[str, Any] | None:
+    latest_metadata = latest_record["metadata"]
+    latest_filing_type = latest_metadata.get("filing_type")
+    for record in reversed(records[:-1]):
+        if record["metadata"].get("filing_type") == latest_filing_type:
+            return record
+    return records[-2] if len(records) >= 2 else None
+
+
+def build_summary_comparison(
+    field_name: str, current_value: Any, previous_value: Any
+) -> str:
+    if previous_value is None:
+        return ""
+
+    current_number = coerce_numeric_value(current_value)
+    previous_number = coerce_numeric_value(previous_value)
+    if current_number is None or previous_number is None:
+        return f"vs {format_financial_value(field_name, previous_value)}"
+
+    previous_text = format_financial_value(field_name, previous_value)
+    if field_name in PERCENTAGE_FIELD_NAMES:
+        delta_points = (current_number - previous_number) * 100
+        return f"vs {previous_text}, {format_signed_decimal(delta_points)}pp"
+
+    if previous_number == 0:
+        delta_value = current_number - previous_number
+        return f"vs {previous_text}, delta {format_signed_financial_value(field_name, delta_value)}"
+
+    change_ratio = ((current_number / previous_number) - 1) * 100
+    return f"vs {previous_text}, {format_signed_decimal(change_ratio)}%"
+
+
+def format_signed_financial_value(field_name: str, value: Any) -> str:
+    text = format_financial_value(field_name, abs(value))
+    if not text:
+        return ""
+    number = coerce_numeric_value(value)
+    if number is not None and number < 0:
+        return f"-{text}"
+    return f"+{text}"
+
+
+def format_signed_decimal(value: int | float) -> str:
+    if value > 0:
+        return f"+{value:.1f}".rstrip("0").rstrip(".")
+    if value < 0:
+        return f"{value:.1f}".rstrip("0").rstrip(".")
+    return "0"
+
+
+def financial_markdown_sort_key(record: dict[str, Any]) -> tuple[str, str, str]:
+    metadata = record["metadata"]
+    period_end = metadata.get("period_end")
+    filing_type = metadata.get("filing_type")
+    doc_id = metadata.get("doc_id")
+    return (
+        str(period_end or ""),
+        str(filing_type or ""),
+        str(doc_id or ""),
+    )
+
+
+def collect_financial_columns(records: list[dict[str, Any]]) -> list[str]:
+    discovered = {
+        field_name
+        for record in records
+        for field_name in record["row"].keys()
+    }
+    ordered = [
+        field_name
+        for field_name in PREFERRED_FINANCIAL_FIELD_ORDER
+        if field_name in discovered
+    ]
+    extras = sorted(discovered.difference(PREFERRED_FINANCIAL_FIELD_ORDER))
+    return ordered + extras
+
+
+def format_financial_value(field_name: str, value: Any) -> str:
+    if value is None:
+        return ""
+    if field_name in PERCENTAGE_FIELD_NAMES:
+        return format_percentage_value(value)
+    if field_name in PLAIN_NUMBER_FIELD_NAMES:
+        return format_decimal_value(value)
+    if field_name in COUNT_FIELD_NAMES:
+        return format_count_value(value)
+    return format_magnitude_value(value)
+
+
+def format_percentage_value(value: Any) -> str:
+    number = coerce_numeric_value(value)
+    if number is None:
+        return format_markdown_cell(value)
+    return f"{number * 100:.1f}%"
+
+
+def format_decimal_value(value: Any) -> str:
+    number = coerce_numeric_value(value)
+    if number is None:
+        return format_markdown_cell(value)
+    if float(number).is_integer():
+        return str(int(number))
+    return f"{number:.2f}".rstrip("0").rstrip(".")
+
+
+def format_count_value(value: Any) -> str:
+    number = coerce_numeric_value(value)
+    if number is None:
+        return format_markdown_cell(value)
+    if float(number).is_integer():
+        return f"{int(number):,}"
+    return f"{number:,.2f}".rstrip("0").rstrip(".")
+
+
+def format_magnitude_value(value: Any) -> str:
+    number = coerce_numeric_value(value)
+    if number is None:
+        return format_markdown_cell(value)
+
+    absolute = abs(number)
+    if absolute >= 1_000_000_000_000:
+        scaled, suffix = number / 1_000_000_000_000, "T"
+    elif absolute >= 1_000_000_000:
+        scaled, suffix = number / 1_000_000_000, "B"
+    elif absolute >= 1_000_000:
+        scaled, suffix = number / 1_000_000, "M"
+    else:
+        if float(number).is_integer():
+            return f"{int(number):,}"
+        return f"{number:.2f}".rstrip("0").rstrip(".")
+
+    return f"{scaled:.1f}".rstrip("0").rstrip(".") + suffix
+
+
+def coerce_numeric_value(value: Any) -> int | float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    return None
+
+
+def format_markdown_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    return text.replace("|", r"\|")
+
+
 def export_business_overview(
     exported_artifacts: list[ExportedJsonArtifact], failures: list[str]
 ) -> None:
@@ -822,11 +1199,11 @@ def render_business_overview_markdown(
     raw_metadata = payload.get("metadata")
     company: dict[str, Any] = raw_company if isinstance(raw_company, dict) else {}
     metadata: dict[str, Any] = raw_metadata if isinstance(raw_metadata, dict) else {}
-    company_name = (
+    company_name = str(
         company.get("name_jp") or company.get("name_en") or "Business Overview"
     )
-    doc_id = metadata.get("doc_id") or ""
-    period_end = metadata.get("period_end") or ""
+    doc_id = str(metadata.get("doc_id") or "")
+    period_end = str(metadata.get("period_end") or "")
 
     lines = [f"# {company_name} Business Overview", ""]
     if doc_id or period_end:
@@ -1064,9 +1441,10 @@ def normalize_filing_type(parsed: ParsedFiling, filing: FilingRecord) -> str:
         if normalized_period_code in FILING_TYPE_BY_PERIOD_CODE:
             return FILING_TYPE_BY_PERIOD_CODE[normalized_period_code]
 
-    return FILING_TYPE_BY_DOC_TYPE.get(
-        filing.doc_type_code, parsed.metadata.filing_type
-    )
+    filing_type = FILING_TYPE_BY_DOC_TYPE.get(filing.doc_type_code)
+    if filing_type:
+        return filing_type
+    return parsed.metadata.filing_type or "filing"
 
 
 def resolve_period_end(parsed: ParsedFiling) -> str:
