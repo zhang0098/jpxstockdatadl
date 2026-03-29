@@ -36,7 +36,9 @@ from jpxstockdatadl.downloader import extract_precise_metric_value
 from jpxstockdatadl.downloader import export_financials_markdown
 from jpxstockdatadl.downloader import finalize_download_summary
 from jpxstockdatadl.downloader import load_manifest
+from jpxstockdatadl.downloader import render_business_overview_markdown
 from jpxstockdatadl.downloader import resolve_recent_session_cache
+from jpxstockdatadl.downloader import select_business_overview_sections
 
 
 def isoformat_z(value: datetime) -> str:
@@ -391,6 +393,72 @@ class DownloaderSessionCacheTests(unittest.TestCase):
 
         self.assertEqual(summary.exported_json_documents, 1)
         self.assertEqual(call_order, ["json", "financials", "business", "manifest"])
+
+
+class SelectBusinessOverviewSectionsTests(unittest.TestCase):
+    def test_keeps_matching_titles(self) -> None:
+        sections = {
+            "Description of Business": "body A",
+            "Business Results of Group": "body B",
+            "Research and Development Activities": "body C",
+            "Management Analysis of Financial Position Operating Results and Cash Flows": "body D",
+            "Unrelated Section": "body E",
+        }
+        result = select_business_overview_sections(sections)
+        self.assertEqual(
+            result,
+            {
+                "Description of Business": "body A",
+                "Business Results of Group": "body B",
+                "Research and Development Activities": "body C",
+                "Management Analysis of Financial Position Operating Results and Cash Flows": "body D",
+            },
+        )
+
+    def test_returns_empty_for_no_match(self) -> None:
+        sections = {
+            "Risk Factors": "body X",
+            "Corporate Governance": "body Y",
+        }
+        result = select_business_overview_sections(sections)
+        self.assertEqual(result, {})
+
+    def test_match_is_case_insensitive_and_strips_whitespace(self) -> None:
+        sections = {"  BUSINESS RESULTS OF GROUP  ": "body Z"}
+        result = select_business_overview_sections(sections)
+        self.assertEqual(result, {"  BUSINESS RESULTS OF GROUP  ": "body Z"})
+
+
+class RenderBusinessOverviewMarkdownTests(unittest.TestCase):
+    def _make_payload(self, name_jp: str = "テスト株式会社", doc_id: str = "S100TEST", period_end: str = "2024-03-31") -> dict:
+        return {
+            "company": {"name_jp": name_jp},
+            "metadata": {"doc_id": doc_id, "period_end": period_end},
+        }
+
+    def test_only_matching_sections_appear_in_output(self) -> None:
+        payload = self._make_payload()
+        text_sections = {
+            "Description of Business": "We make widgets.",
+            "Business Results of Group": "Revenue increased.",
+            "Unrelated Section": "Should not appear.",
+        }
+        md = render_business_overview_markdown(payload, text_sections)
+        self.assertIn("## Description of Business", md)
+        self.assertIn("## Business Results of Group", md)
+        self.assertNotIn("## Unrelated Section", md)
+        self.assertNotIn("Should not appear.", md)
+
+    def test_no_matching_sections_shows_fallback_message(self) -> None:
+        payload = self._make_payload()
+        text_sections = {"Risk Factors": "Various risks exist."}
+        md = render_business_overview_markdown(payload, text_sections)
+        self.assertIn("No text sections found.", md)
+
+    def test_empty_sections_shows_fallback_message(self) -> None:
+        payload = self._make_payload()
+        md = render_business_overview_markdown(payload, {})
+        self.assertIn("No text sections found.", md)
 
 
 if __name__ == "__main__":

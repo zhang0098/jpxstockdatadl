@@ -78,6 +78,7 @@ BUSINESS_OVERVIEW_SECTION_KEYWORDS = (
     "description of business",
     "management analysis of financial position operating results and cash flows",
     "research and development activities",
+    "business results of group",
 )
 PERCENTAGE_FIELD_NAMES = frozenset({"equity_ratio", "roe", "payout_ratio"})
 PLAIN_NUMBER_FIELD_NAMES = frozenset(
@@ -1211,7 +1212,7 @@ def render_business_overview_markdown(
         lines.append(f"- period_end: {period_end}")
         lines.append("")
 
-    selected_sections = text_sections
+    selected_sections = select_business_overview_sections(text_sections)
 
     if not selected_sections:
         lines.append("No text sections found.")
