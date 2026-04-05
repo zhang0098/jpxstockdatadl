@@ -949,7 +949,7 @@ def render_financials_markdown(records: list[dict[str, Any]]) -> str:
         lines.append(f"- securities_code: {company['securities_code']}")
     if company.get("edinet_code"):
         lines.append(f"- edinet_code: {company['edinet_code']}")
-    lines.append("- units: monetary values use M/B/T; ratios use %")
+    lines.append("- units: monetary values are full numbers; ratios use %")
     lines.append("")
 
     lines.extend(render_financials_summary(sorted_records))
@@ -1131,8 +1131,8 @@ def format_count_value(value: Any) -> str:
     if number is None:
         return format_markdown_cell(value)
     if float(number).is_integer():
-        return f"{int(number):,}"
-    return f"{number:,.2f}".rstrip("0").rstrip(".")
+        return str(int(number))
+    return f"{number:.2f}".rstrip("0").rstrip(".")
 
 
 def format_magnitude_value(value: Any) -> str:
@@ -1140,19 +1140,9 @@ def format_magnitude_value(value: Any) -> str:
     if number is None:
         return format_markdown_cell(value)
 
-    absolute = abs(number)
-    if absolute >= 1_000_000_000_000:
-        scaled, suffix = number / 1_000_000_000_000, "T"
-    elif absolute >= 1_000_000_000:
-        scaled, suffix = number / 1_000_000_000, "B"
-    elif absolute >= 1_000_000:
-        scaled, suffix = number / 1_000_000, "M"
-    else:
-        if float(number).is_integer():
-            return f"{int(number):,}"
-        return f"{number:.2f}".rstrip("0").rstrip(".")
-
-    return f"{scaled:.1f}".rstrip("0").rstrip(".") + suffix
+    if float(number).is_integer():
+        return str(int(number))
+    return f"{number:.2f}".rstrip("0").rstrip(".")
 
 
 def coerce_numeric_value(value: Any) -> int | float | None:

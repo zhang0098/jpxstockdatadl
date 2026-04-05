@@ -328,18 +328,18 @@ class DownloaderSessionCacheTests(unittest.TestCase):
         self.assertFalse((output_dir / "financials.md").exists())
         self.assertIn("- company: オーエスジー株式会社", markdown)
         self.assertIn("- securities_code: 6136", markdown)
-        self.assertIn("- units: monetary values use M/B/T; ratios use %", markdown)
+        self.assertIn("- units: monetary values are full numbers; ratios use %", markdown)
         self.assertIn("## Key Metrics", markdown)
         self.assertIn("- latest filing: 2025-11-30 annual (FY2025)", markdown)
         self.assertIn("- comparable filing: 2025-05-31 semiannual", markdown)
         self.assertIn("- currency: JPY", markdown)
-        self.assertIn("- Revenue: 160.6B (vs 80.1B, +100.5%)", markdown)
-        self.assertIn("- Net income: 14.3B (vs 7.5B, +91.1%)", markdown)
+        self.assertIn("- Revenue: 160619000000 (vs 80100000000, +100.5%)", markdown)
+        self.assertIn("- Net income: 14334000000 (vs 7500000000, +91.1%)", markdown)
         self.assertIn("- EPS: 172.11 (vs 91.2, +88.7%)", markdown)
         self.assertIn("- Equity ratio: 67.5% (vs 64.1%, +3.4pp)", markdown)
         self.assertIn("| period_end | period_start | fiscal_year | filing_type | accounting_standard | revenue | net_income | eps | equity_ratio | num_employees |", markdown)
-        semiannual_row = "| 2025-05-31 | 2024-12-01 | 2025 | semiannual | JP-GAAP | 80.1B | 7.5B | 91.2 | 64.1% | 7,500 |"
-        annual_row = "| 2025-11-30 | 2024-12-01 | 2025 | annual | JP-GAAP | 160.6B | 14.3B | 172.11 | 67.5% | 7,563 |"
+        semiannual_row = "| 2025-05-31 | 2024-12-01 | 2025 | semiannual | JP-GAAP | 80100000000 | 7500000000 | 91.2 | 64.1% | 7500 |"
+        annual_row = "| 2025-11-30 | 2024-12-01 | 2025 | annual | JP-GAAP | 160619000000 | 14334000000 | 172.11 | 67.5% | 7563 |"
         self.assertIn(semiannual_row, markdown)
         self.assertIn(annual_row, markdown)
         self.assertLess(markdown.index(semiannual_row), markdown.index(annual_row))
